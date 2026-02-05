@@ -361,3 +361,270 @@ F_out.sigma = sigma;
 F_out.feature_names = feature_names;
 
 disp('Block-5 complete: F_out ready for SVM (Block-6).');
+
+function [predLabels, trainedModel, results] = classifierModel(X, Y, varargin)
+%CLASSIFIERMODEL Train/evaluate an SVM-based UAV-vs-Bird classifier.
+%   [predLabels, trainedModel, results] = classifierModel(X, Y)
+%   trains on feature matrix X (N x D) and labels Y (N x 1), performs a
+%   stratified hold-out split, normalizes using training statistics,
+%   tunes SVM hyperparameters, predicts hold-out labels, and returns model
+%   artifacts for deployment.
+%
+%   Optional name-value pairs:
+%     'HoldOut'      : hold-out ratio in (0,1), default 0.2
+%     'Optimize'     : true/false, hyperparameter optimization, default true
+%     'Model'        : trainedModel struct for inference-only mode
+%     'Standardize'  : true/false, default true
+%
+%   Inference-only mode:
+%     predLabels = classifierModel(Xnew, [], 'Model', trainedModel)
+%
+%   Inputs:
+%     X : feature matrix (N x D)
+%     Y : labels (N x 1) categorical/string/cellstr/numeric
+%
+%   Outputs:
+%     predLabels   : predictions on hold-out set (train mode) or X (inference)
+%     trainedModel : struct containing model + normalization parameters
+%     results      : diagnostics (indices, scores, confusion matrix, metrics)
+
+p = inputParser;
+addParameter(p, 'HoldOut', 0.20, @(v) isnumeric(v) && isscalar(v) && v > 0 && v < 1);
+addParameter(p, 'Optimize', true, @(v) islogical(v) || isnumeric(v));
+addParameter(p, 'Model', [], @(v) isempty(v) || isstruct(v));
+addParameter(p, 'Standardize', true, @(v) islogical(v) || isnumeric(v));
+parse(p, varargin{:});
+opt = p.Results;
+
+% ---------- Inference-only mode ----------
+if isempty(Y)
+    if isempty(opt.Model)
+        error('Inference mode requires a ''Model'' struct when Y is empty.');
+    end
+    trainedModel = opt.Model;
+    Xz = normalizeWithModel(X, trainedModel);
+    [predLabels, score] = predict(trainedModel.Model, Xz);
+    results = struct('scores', score);
+    return;
+end
+
+if istable(X)
+    X = table2array(X);
+end
+if isrow(Y)
+    Y = Y.';
+end
+
+Y = categorical(Y);
+[N, D] = size(X);
+if N < 10
+    warning('Small dataset (N=%d). Consider collecting more samples for reliable generalization.', N);
+end
+if numel(categories(Y)) < 2
+    error('At least 2 classes are required for classification.');
+end
+
+% ---------- Train-test split ----------
+cvp = cvpartition(Y, 'HoldOut', opt.HoldOut);
+idxTrain = training(cvp);
+idxTest  = test(cvp);
+
+XTrain = X(idxTrain, :);
+YTrain = Y(idxTrain, :);
+XTest  = X(idxTest, :);
+YTest  = Y(idxTest, :);
+
+% ---------- Feature normalization ----------
+if opt.Standardize
+    mu = mean(XTrain, 1, 'omitnan');
+    sigma = std(XTrain, 0, 1, 'omitnan');
+    sigma(sigma < 1e-12) = 1;
+else
+    mu = zeros(1, D);
+    sigma = ones(1, D);
+end
+
+XTrainZ = (XTrain - mu) ./ sigma;
+XTestZ  = (XTest - mu) ./ sigma;
+
+% ---------- Model training ----------
+isBinary = numel(categories(YTrain)) == 2;
+
+if isBinary
+    svmArgs = {'KernelFunction', 'rbf', 'ClassNames', categories(YTrain)};
+    if opt.Optimize
+        mdl = fitcsvm( ...
+            XTrainZ, YTrain, ...
+            svmArgs{:}, ...
+            'OptimizeHyperparameters', {'BoxConstraint','KernelScale'}, ...
+            'HyperparameterOptimizationOptions', struct( ...
+                'Kfold', 5, ...
+                'ShowPlots', false, ...
+                'Verbose', 0));
+    else
+        mdl = fitcsvm(XTrainZ, YTrain, svmArgs{:}, 'BoxConstraint', 1, 'KernelScale', 'auto');
+    end
+
+    % Probability estimates for ROC/evaluation
+    mdl = fitPosterior(mdl);
+    [predLabels, score] = predict(mdl, XTestZ);
+
+else
+    t = templateSVM('KernelFunction', 'rbf', 'Standardize', false);
+    if opt.Optimize
+        mdl = fitcecoc( ...
+            XTrainZ, YTrain, ...
+            'Learners', t, ...
+            'Coding', 'onevsall', ...
+            'OptimizeHyperparameters', {'BoxConstraint','KernelScale'}, ...
+            'HyperparameterOptimizationOptions', struct( ...
+                'Kfold', 5, ...
+                'ShowPlots', false, ...
+                'Verbose', 0));
+    else
+        mdl = fitcecoc(XTrainZ, YTrain, 'Learners', t, 'Coding', 'onevsall');
+    end
+    [predLabels, score] = predict(mdl, XTestZ);
+end
+
+% ---------- Basic metrics ----------
+C = confusionmat(YTest, predLabels, 'Order', categories(Y));
+acc = sum(diag(C)) / max(sum(C(:)), 1);
+
+trainedModel = struct();
+trainedModel.Model = mdl;
+trainedModel.mu = mu;
+trainedModel.sigma = sigma;
+trainedModel.classNames = categories(Y);
+trainedModel.isBinary = isBinary;
+trainedModel.featureDim = D;
+
+results = struct();
+results.idxTrain = idxTrain;
+results.idxTest = idxTest;
+results.YTrain = YTrain;
+results.YTest = YTest;
+results.scores = score;
+results.confMat = C;
+results.accuracy = acc;
+results.classOrder = categories(Y);
+
+fprintf('Block-6: Classification complete. Hold-out accuracy = %.2f%%\n', 100*acc);
+
+end
+
+function Xz = normalizeWithModel(X, model)
+if istable(X)
+    X = table2array(X);
+end
+if size(X,2) ~= model.featureDim
+    error('Feature dimension mismatch: expected %d, got %d.', model.featureDim, size(X,2));
+end
+Xz = (X - model.mu) ./ model.sigma;
+end
+function metrics = performanceEvaluation(yTrue, yPred, varargin)
+%PERFORMANCEEVALUATION Compute and plot classifier performance metrics.
+%   metrics = performanceEvaluation(yTrue, yPred)
+%   metrics = performanceEvaluation(..., 'Scores', scoreMatrix)
+%   metrics = performanceEvaluation(..., 'ClassNames', classNames)
+%   metrics = performanceEvaluation(..., 'NoiseResults', noiseStruct)
+%
+%   Inputs:
+%     yTrue : true labels (N x 1)
+%     yPred : predicted labels (N x 1)
+%
+%   Name-value inputs:
+%     'Scores'      : posterior scores/probabilities (N x C), optional
+%     'ClassNames'  : class order to enforce, optional
+%     'NoiseResults': struct with fields snrDb, accuracy for robustness plot
+%     'Title'       : chart title prefix
+
+p = inputParser;
+addParameter(p, 'Scores', [], @(v) isempty(v) || isnumeric(v));
+addParameter(p, 'ClassNames', [], @(v) isempty(v) || iscellstr(v) || isstring(v) || iscategorical(v));
+addParameter(p, 'NoiseResults', struct(), @isstruct);
+addParameter(p, 'Title', 'Block-7 Performance', @(v) ischar(v) || isstring(v));
+parse(p, varargin{:});
+opt = p.Results;
+
+yTrue = categorical(yTrue);
+yPred = categorical(yPred);
+
+if isempty(opt.ClassNames)
+    classNames = union(categories(yTrue), categories(yPred));
+else
+    classNames = cellstr(string(opt.ClassNames));
+end
+
+C = confusionmat(yTrue, yPred, 'Order', classNames);
+
+TP = diag(C);
+FP = sum(C,1)' - TP;
+FN = sum(C,2) - TP;
+TN = sum(C(:)) - TP - FP - FN;
+
+precision = TP ./ max(TP + FP, eps);
+recall    = TP ./ max(TP + FN, eps);
+f1        = 2*(precision.*recall) ./ max(precision + recall, eps);
+specificity = TN ./ max(TN + FP, eps);
+
+accuracy = sum(TP) / max(sum(C(:)), 1);
+macroF1 = mean(f1, 'omitnan');
+weightedF1 = sum(f1 .* (sum(C,2) / sum(C(:))), 'omitnan');
+
+metrics = struct();
+metrics.confusionMatrix = C;
+metrics.classOrder = classNames;
+metrics.accuracy = accuracy;
+metrics.precision = precision;
+metrics.recall = recall;
+metrics.f1 = f1;
+metrics.specificity = specificity;
+metrics.macroF1 = macroF1;
+metrics.weightedF1 = weightedF1;
+
+fprintf('Block-7: Accuracy = %.2f%% | Macro-F1 = %.3f | Weighted-F1 = %.3f\n', ...
+    100*accuracy, macroF1, weightedF1);
+
+% ---------- Plots ----------
+figure('Name', 'Confusion Matrix');
+confusionchart(C, classNames, 'Title', sprintf('%s: Confusion Matrix', opt.Title));
+
+figure('Name', 'Per-Class Metrics');
+barData = [precision, recall, f1, specificity];
+bar(barData);
+xticks(1:numel(classNames));
+xticklabels(classNames);
+xtickangle(20);
+legend({'Precision','Recall','F1','Specificity'}, 'Location', 'best');
+ylim([0, 1]);
+grid on;
+title(sprintf('%s: Per-Class Metrics', opt.Title));
+
+% ---------- ROC (binary only, with score input) ----------
+if ~isempty(opt.Scores) && numel(classNames) == 2
+    posClass = classNames{2};
+    [Xroc, Yroc, ~, AUC] = perfcurve(yTrue, opt.Scores(:,2), posClass);
+    metrics.rocFpr = Xroc;
+    metrics.rocTpr = Yroc;
+    metrics.auc = AUC;
+
+    figure('Name','ROC Curve');
+    plot(Xroc, Yroc, 'LineWidth', 2); grid on;
+    xlabel('False Positive Rate');
+    ylabel('True Positive Rate');
+    title(sprintf('%s: ROC Curve (AUC = %.3f)', opt.Title, AUC));
+end
+
+% ---------- Noise robustness (optional) ----------
+if isfield(opt.NoiseResults, 'snrDb') && isfield(opt.NoiseResults, 'accuracy')
+    figure('Name','Noise Robustness');
+    plot(opt.NoiseResults.snrDb, opt.NoiseResults.accuracy, '-o', 'LineWidth', 1.8);
+    xlabel('SNR (dB)');
+    ylabel('Accuracy');
+    grid on;
+    title(sprintf('%s: Robustness to Noise', opt.Title));
+    metrics.noiseRobustness = opt.NoiseResults;
+end
+
+end
