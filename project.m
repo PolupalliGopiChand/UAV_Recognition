@@ -3,7 +3,7 @@ clc; clear; close all;
 fs = 4000;
 SNR_dB = 10;
 
-%% ======================= BLOCK 1 ===============================
+%% ============================ BLOCK 1 ===================================
 [s_uav, s_bird, t] = B1_generate_signals(fs, SNR_dB);
 
 figure;
@@ -15,14 +15,15 @@ xlabel('Time (s)'); ylabel('Amplitude (v)'); grid on;
 subplot(2,1,2); plot(t, real(s_bird));
 title('Bird Echo Signal');
 xlabel('Time (s)'); ylabel('Amplitude (v)'); grid on;
-%% ======================= BLOCK 2 ===============================
-[t, x_alpha_uav, alpha_opt_uav, alpha_vec_uav, H2_uav]     = B2_chirp_optimizer(s_uav, fs);
+
+%% ============================ BLOCK 2 ===================================
+[t, x_alpha_uav,  alpha_opt_uav,  alpha_vec_uav,  H2_uav ] = B2_chirp_optimizer(s_uav,  fs);
 [t, x_alpha_bird, alpha_opt_bird, alpha_vec_bird, H2_bird] = B2_chirp_optimizer(s_bird, fs);
 
-fprintf('\nBlock-2 Output:\n');
-fprintf('UAV Actual Chirp Rate     = %.2f Hz/s\n', 2e4);
-fprintf('UAV Estimated Chirp Rate  = %.2f Hz/s\n', alpha_opt_uav);
-fprintf('Bird Actual Chirp Rate    = %.2f Hz/s\n', 1000);
+fprintf('Block-2 Output:\n');
+fprintf('UAV Actual Chirp Rate      = %.2f Hz/s\n', 2e4);
+fprintf('UAV Estimated Chirp Rate   = %.2f Hz/s\n', alpha_opt_uav);
+fprintf('Bird Actual Chirp Rate     = %.2f Hz/s\n', 1000);
 fprintf('Bird Estimated Chirp Rate  = %.2f Hz/s\n', alpha_opt_bird);
 
 figure;
@@ -43,15 +44,15 @@ subplot(3,1,3); plot(t, real(x_alpha_bird));
 title('Dechirped Bird Signal');
 xlabel('Time (s)'); ylabel('Amplitude (v)'); grid on;
 
-%% ======================= BLOCK 3 ===============================
-[S_orig_uav, S_enh_uav, fd_uav, t_stft_uav, snr_before_uav, snr_after_uav] = B3_doppler_enhancer(x_alpha_uav, fs);
+%% ============================ BLOCK 3 ===================================
+[S_orig_uav,  S_enh_uav,  fd_uav,  t_stft_uav,  snr_before_uav,  snr_after_uav ] = B3_doppler_enhancer(x_alpha_uav,  fs);
 [S_orig_bird, S_enh_bird, fd_bird, t_stft_bird, snr_before_bird, snr_after_bird] = B3_doppler_enhancer(x_alpha_bird, fs);
 
 fprintf('\nBlock-3 Output:\n');
-fprintf('Harmonic SNR Before (UAV) = %.2f dB\n', snr_before_uav);
-fprintf('Harmonic SNR After  (UAV) = %.2f dB\n', snr_after_uav);
-fprintf('Harmonic SNR Before (UAV) = %.2f dB\n', snr_before_bird);
-fprintf('Harmonic SNR After  (UAV) = %.2f dB\n', snr_after_bird);
+fprintf('Harmonic SNR Before (UAV)  = %.2f dB\n', snr_before_uav);
+fprintf('Harmonic SNR After  (UAV)  = %.2f dB\n', snr_after_uav);
+fprintf('Harmonic SNR Before (UAV)  = %.2f dB\n', snr_before_bird);
+fprintf('Harmonic SNR After  (UAV)  = %.2f dB\n', snr_after_bird);
 
 figure;
 % Original UAV Spectrogram
@@ -71,73 +72,43 @@ subplot(2,2,4); imagesc(t_stft_bird, fd_bird, 10*log10(S_enh_bird+1e-6));
 axis xy; c = colorbar; ylabel(c, 'Energy (dB)'); xlabel('Time (s)'); ylabel('Doppler Frequency (Hz)');
 title('Enhanced Bird Spectrogram');
 
-%% ======================= BLOCK 4 ===============================
-TF_uav  = B4_TF_signature(S_enh_uav, fd_uav);
-TF_bird = B4_TF_signature(S_enh_bird, fd_bird);
+%% ============================ BLOCK 4 ===================================
+TF_sig_uav  = B4_TF_signature_generator(S_enh_uav,  fd_uav,  t_stft_uav );
+TF_sig_bird = B4_TF_signature_generator(S_enh_bird, fd_bird, t_stft_bird);
 
 fprintf('\nBlock-4 Output:\n');
-fprintf('UAV Doppler Bandwidth  = %.2f Hz\n', TF_uav.doppler_bw);
-fprintf('Bird Doppler Bandwidth = %.2f Hz\n', TF_bird.doppler_bw);
+fprintf('UAV Doppler Bandwidth      = %.2f Hz\n', TF_sig_uav.doppler_bw);
+fprintf('Bird Doppler Bandwidth     = %.2f Hz\n', TF_sig_bird.doppler_bw);
+fprintf('UAV Spectral Entropy       = %.4f\n', TF_sig_uav.spectral_entropy);
+fprintf('Bird Spectral Entropy      = %.4f\n', TF_sig_bird.spectral_entropy);
 
 figure;
+% Normalized UAV Spectrogram
+subplot(3,2,1); imagesc(TF_sig_uav.t_stft, TF_sig_uav.fd, 10*log10(TF_sig_uav.S_normalized + 1e-6));
+axis xy; c = colorbar; ylabel(c, 'Energy (dB)'); xlabel('Time (s)'); ylabel('Doppler Frequency (Hz)');
+title('Normalized UAV Spectrogram');
+% Normalized Bird Spectrogram
+subplot(3,2,2); imagesc(TF_sig_bird.t_stft, TF_sig_bird.fd, 10*log10(TF_sig_bird.S_normalized + 1e-6));
+axis xy; c = colorbar; ylabel(c, 'Energy (dB)'); xlabel('Time (s)'); ylabel('Doppler Frequency (Hz)');
+title('Normalized UAV Spectrogram');
+% UAV Micro-Doppler Ridge
+subplot(3,2,3); plot(TF_sig_uav.t_stft, TF_sig_uav.tf_ridge, 'LineWidth', 1.5);
+xlabel('Time (s)'); ylabel('Doppler Frequency (Hz)');
+title('Micro-Doppler Ridge'); grid on;
+% Bird Micro-Doppler Ridge
+subplot(3,2,4); plot(TF_sig_bird.t_stft, TF_sig_bird.tf_ridge, 'LineWidth', 1.5);
+xlabel('Time (s)'); ylabel('Doppler Frequency (Hz)');
+title('Micro-Doppler Ridge'); grid on;
+% UAV Doppler Marginal
+subplot(3,2,5); plot(TF_sig_uav.fd, TF_sig_uav.doppler_marginal, 'LineWidth', 1.5);
+xlabel('Doppler Frequency (Hz)'); ylabel('Normalized Energy');
+title('Doppler Marginal Signature'); grid on;
+% Bird Doppler Marginal
+subplot(3,2,6); plot(TF_sig_bird.fd, TF_sig_bird.doppler_marginal, 'LineWidth', 1.5);
+xlabel('Doppler Frequency (Hz)'); ylabel('Normalized Energy');
+title('Doppler Marginal Signature'); grid on;
 
-subplot(4,2,1);
-imagesc(t_stft_uav, fd_uav, 10*log10(S_enh_uav+1e-6));
-axis xy; title('Enhanced UAV Spectrogram');
 
-subplot(4,2,3);
-imagesc(t_stft_bird, fd_bird, 10*log10(S_enh_bird+1e-6));
-axis xy; title('Enhanced Bird Spectrogram');
-
-subplot(4,2,2);
-imagesc(t_stft_uav, fd_uav, 10*log10(TF_uav.S_norm+1e-6));
-axis xy; title('Enhanced UAV Spectrogram');
-
-subplot(4,2,4);
-imagesc(t_stft_bird, fd_bird, 10*log10(TF_bird.S_norm+1e-6));
-axis xy; title('Enhanced Bird Spectrogram');
-
-subplot(4,2,5);
-plot(fd_uav, TF_uav.doppler_marginal);
-title('UAV Doppler Marginal'); grid on;
-
-subplot(4,2,7);
-plot(fd_bird, TF_bird.doppler_marginal);
-title('Bird Doppler Marginal'); grid on;
-
-subplot(4,2,6);
-plot(t_stft_uav, TF_uav.tf_ridge); title('UAV Micro-Doppler Ridge'); grid on;
-
-subplot(4,2,8);
-plot(t_stft_bird, TF_bird.tf_ridge); title('Bird Micro-Doppler Ridge'); grid on;
-
-fprintf('Block-4 complete: TF signatures and micro-Doppler extracted.\n');
-
-%% ======================= BLOCK 5 ===============================
-fprintf('\n******** BLOCK-5: FEATURE EXTRACTION ********\n');
-
-F_uav  = B5_feature_extractor(TF_uav, fd_uav);
-F_bird = B5_feature_extractor(TF_bird, fd_bird);
-
-fprintf('\nBlock-5 Output:\n');
-disp('Normalized feature vectors generated for UAV and Bird.');
-disp('These will be used as inputs to the SVM classifier.');
-
-figure;
-bar([F_uav.X_norm; F_bird.X_norm]');
-legend({'UAV','Bird'});
-title('Normalized Feature Comparison');
-xlabel('Feature Index');
-ylabel('Z-score Value');
-grid on;
-
-fprintf('Block-5 complete: Features ready for classification.\n');
-
-%% ======================= DATASET FOR BLOCK-6 ===============================
-X_all = [F_uav.X_pca; F_bird.X_pca];
-labels = [1; 0];
-
-fprintf('\nDataset prepared for Block-6 (SVM).\n');
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% ======================== FUNCTIONS (B1–B5) =============================
@@ -186,7 +157,7 @@ alpha_max =  5e4;
 N_alpha   = 64;
 alpha_vec = linspace(alpha_min, alpha_max, N_alpha);
 
-win_len  = 256;
+win_len  = 512;
 win      = hamming(win_len);
 noverlap = round(0.75*win_len);
 nfft     = 1024;
@@ -265,37 +236,34 @@ snr_after  = 10*log10(harmPower_enh / bodyPower_enh);
 end
 
 %% -------- B4 --------
-function TF = B4_TF_signature(S_enh, fd)
+function TF_sig = B4_TF_signature_generator(S_enh, fd, t_stft)
 
 eps_val = 1e-6;
-S_norm = S_enh./(sum(S_enh,1)+eps_val);
-TF.S_norm = S_enh./(sum(S_enh,1)+eps_val)
+S_norm  = S_enh  ./ (sum(S_enh,1)  + eps_val); % Normalize spectrograms
+dop_marg  = sum(S_norm,2); % Doppler marginals
 
-TF.doppler_marginal = sum(S_norm,2);
-TF.time_marginal = sum(S_norm,1);
+% Micro-Doppler ridge
+[~, ridge_idx]  = max(S_norm,[],1);
+tf_ridge  = fd(ridge_idx);
 
-[~,idx] = max(S_norm,[],1);
-TF.tf_ridge = fd(idx);
+% Spectral entropy (spread of micro-Doppler energy)
+p_dop = dop_marg / (sum(dop_marg)+eps_val);
+spec_entropy = -sum(p_dop .* log(p_dop + eps_val));
 
-cdf = cumsum(TF.doppler_marginal);
-cdf = cdf/max(cdf);
-TF.doppler_bw = fd(find(cdf>=0.95,1)) - fd(find(cdf>=0.05,1));
+% Doppler bandwidth
+cdf = cumsum(dop_marg);
+cdf = cdf / max(cdf);
+f_low  = fd(find(cdf>=0.05,1));
+f_high = fd(find(cdf>=0.95,1));
+doppler_bw = f_high - f_low;
 
-end
-
-%% -------- B5 --------
-function F = B5_feature_extractor(TF, fd)
-
-X = [mean(abs(TF.tf_ridge)), std(TF.tf_ridge), ...
-     TF.doppler_bw, mean(TF.doppler_marginal), ...
-     std(TF.doppler_marginal)];
-
-mu = mean(X); 
-sigma = std(X)+1e-9;
-
-F.X_norm = (X-mu)./sigma;
-F.X_pca = F.X_norm;
-F.mu = mu; 
-F.sigma = sigma;
+% Store outputs
+TF_sig.S_normalized     = S_norm;
+TF_sig.doppler_marginal = dop_marg;
+TF_sig.tf_ridge         = tf_ridge;
+TF_sig.spectral_entropy = spec_entropy;
+TF_sig.doppler_bw       = doppler_bw;
+TF_sig.fd               = fd;
+TF_sig.t_stft           = t_stft;
 
 end
