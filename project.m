@@ -2,13 +2,13 @@ clc; clear; close all;
 
 %% ----- PARAMETERS -----
 fs = 4000;                                          % sampling frequency
-SNR_dB = 0 + 10*rand;                               % random noise level
+SNR_dB = 10 + 20 *rand;                             % random noise level
 SNR_sweep = 0:3:30;                                 % snr range for testing
 N_samples = 500;                                    % number of samples per a class
 
 %% =========================== DATASET CREATION ===========================
-X = [];                                             % feature matrix
-y = [];                                             % labels (1 = UAV, 0 = Bird)
+X = zeros(2*N_samples, 7);                          % feature matrix
+y = zeros(2*N_samples, 1);                          % labels
 
 for n = 1:N_samples
     % BLOCK 1
@@ -29,11 +29,28 @@ for n = 1:N_samples
     % BLOCK 5
     feat_uav_n  = B5_feature_extractor(TF_sig_uav);
     feat_bird_n = B5_feature_extractor(TF_sig_bird);
-    X = [X; feat_uav_n; feat_bird_n];
-    y = [y; 1; 0];
+    idx = 2*n - 1;
+    X(idx,:)   = feat_uav_n;
+    X(idx+1,:) = feat_bird_n;
+    y(idx)     = 1;
+    y(idx+1)   = 0;
 end
 
 %% ----- BLOCK 6 -----
+% normalize entire dataset
+mu = mean(X);
+sigma = std(X);
+X_norm = (X - mu) ./ (sigma + eps);
+% global hyperparameters tuning
+svmOpt = fitcsvm(X_norm,y,...
+    'KernelFunction','rbf',...
+    'OptimizeHyperparameters',{'BoxConstraint','KernelScale'},...
+    'HyperparameterOptimizationOptions',struct(...
+        'ShowPlots',false,...
+        'Verbose',0));
+bestBC = svmOpt.BoxConstraints(1);
+bestKS = svmOpt.KernelParameters.Scale;
+
 K = 5;                                              % number of folds for cross-validation
 cv = cvpartition(y,'KFold',K);                      % split data into K folds
 acc = zeros(K,1);                                   % store accuracy for each fold
@@ -52,22 +69,20 @@ for i = 1:K
     Xtest  = (Xtest  - mu_fold) ./ (sigma_fold + eps);
 
     % TRAIN SVM CLASSIFIER WITH RBF KERNEL
-    svmModel = fitcsvm(Xtrain,ytrain,'KernelFunction','rbf','Standardize',false);
+    svmModel = fitcsvm(Xtrain,ytrain,...
+        'KernelFunction','rbf',...
+        'BoxConstraint',bestBC,...
+        'KernelScale',bestKS);
 
     % TEST MODEL & STORE ACCURACY
     acc(i) = mean(predict(svmModel,Xtest)==ytest);
 end
 
-% NORMALIZE ENTIRE DATASET
-mu = mean(X);
-sigma = std(X);
-X_norm = (X - mu) ./ (sigma + eps);
-
 % TRAIN FINAL SVM MODEL USING ALL DATA
 svmFinal = fitcsvm(X_norm, y,...
         'KernelFunction','rbf',...
-        'BoxConstraint',1,...
-        'KernelScale','auto');
+        'BoxConstraint',bestBC,...
+        'KernelScale',bestKS);
 
 
 %% ----- BLOCK 7 -----
@@ -113,20 +128,28 @@ for k = 1:length(SNR_sweep)
     Xtest  = (Xtest-mu_snr)./(sigma_snr+eps);
     
     % TRAIN SVM CLASSIFIER
-    model_snr = fitcsvm(Xtrain,ytrain,'KernelFunction','rbf');
+    model_snr = fitcsvm(Xtrain,ytrain,...
+        'KernelFunction','rbf',...
+        'BoxConstraint',bestBC,...
+        'KernelScale',bestKS);
 
     % COMPUTE CLASSIFICATION ACCURACY AT THIS SNR
     acc_snr(k) = mean(predict(model_snr,Xtest)==ytest)*100;
 end
 
 % FINAL PERFORMANCE EVALUATION
-X_eval = (X - mu) ./ (sigma + eps);                 % normalize full dataset using previously computed statistics
-[~, score_final] = predict(svmFinal, X_eval);       % get prediction scores for ROC analysis
+svmCV = fitcsvm(X_norm, y,...
+    'KernelFunction','rbf',...
+    'BoxConstraint',bestBC,...
+    'KernelScale',bestKS,...
+    'CrossVal','on',...
+    'KFold',5);
+
+[labelCV, score_final] = kfoldPredict(svmCV);       % get prediction scores for ROC analysis
 [~, ~, ~, AUC] = perfcurve(y, score_final(:,2), 1); % compute area under curve (AUC)
 
 % EXTRACT CONFUSION MATRIX VALUES
-y_pred = predict(svmFinal, X_eval);                 % predict labels for confusion matrix
-C = confusionmat(y, y_pred);                        % build confusion matrix
+C = confusionmat(y, labelCV);                       % build confusion matrix
 TP = C(2,2);                                        % correctly detected UAV
 TN = C(1,1);                                        % correctly detected Bird
 FP = C(1,2);                                        % bird classified as UAV
@@ -378,14 +401,26 @@ end
 sgtitle('FEATURE EXTACTION');
 
 %% -------- FIGURE 6 --------
-figure;
+% Use holdout split
+cv_pca = cvpartition(y,'HoldOut',0.3);
 
-[~,score,~,~,explained] = pca(X);
-h = gscatter(score(:,1), score(:,2), y, ...
+Xtrain_pca = X(training(cv_pca),:);
+ytrain_pca = y(training(cv_pca));
+Xtest_pca  = X(test(cv_pca),:);
+ytest_pca  = y(test(cv_pca));
+
+% Normalize using training statistics
+mu_pca = mean(Xtrain_pca);
+sigma_pca = std(Xtrain_pca);
+Xtrain_pca = (Xtrain_pca - mu_pca)./(sigma_pca + eps);
+Xtest_pca  = (Xtest_pca - mu_pca)./(sigma_pca + eps);
+[coeff, score_train, ~, ~, explained] = pca(Xtrain_pca);
+score_test = Xtest_pca * coeff;
+score_all = [score_train; score_test];
+y_all = [ytrain_pca; ytest_pca];
+figure;
+gscatter(score_all(:,1), score_all(:,2), y_all, ...
     [0.2 0.6 0.9; 0.9 0.4 0.2], 'ox', 8);
-set(h(1), 'DisplayName', 'Bird');
-set(h(2), 'DisplayName', 'UAV');
-legend('Location','best');
 xlabel(['PC1  (',num2str(explained(1),3),'%)']);
 ylabel(['PC2  (',num2str(explained(2),3),'%)']);
 title('LOW-DIMENSIONAL FEATURE SPACE (PCA)');
@@ -394,33 +429,33 @@ grid on; box on;
 %% -------- FIGURE 7 --------
 figure;
 
-cv_hold = cvpartition(y,'HoldOut',0.3);
-Xtrain_full = X(training(cv_hold),:);
-ytrain_full = y(training(cv_hold));
-Xval = X(test(cv_hold),:);
-yval = y(test(cv_hold));
-Ntrain = length(ytrain_full);
-
-train_sizes = round(linspace(20, Ntrain-10, 10));
+Ntotal = length(y);
+train_sizes = round(linspace(20, Ntotal, 12));
 acc_lc = zeros(size(train_sizes));
-
 for k = 1:length(train_sizes)
     n_samples = train_sizes(k);
-    idx = randperm(Ntrain, n_samples);
-    Xsub = Xtrain_full(idx,:);
-    ysub = ytrain_full(idx);
-    mu_lc = mean(Xsub);
-    sigma_lc = std(Xsub);
-    Xsub = (Xsub - mu_lc)./(sigma_lc + eps);
-    Xval_n = (Xval - mu_lc)./(sigma_lc + eps);
-    model = fitcsvm(Xsub, ysub,'KernelFunction','rbf');
-    acc_lc(k) = mean(predict(model,Xval_n)==yval)*100;
+    acc_temp = zeros(5,1);
+    for r = 1:5
+        idx = randperm(Ntotal, n_samples);
+        Xsub = X(idx,:);
+        ysub = y(idx);
+        mu_lc = mean(Xsub);
+        sigma_lc = std(Xsub);
+        Xsub = (Xsub - mu_lc)./(sigma_lc + eps);
+        cv_temp = fitcsvm(Xsub, ysub,...
+            'KernelFunction','rbf',...
+            'BoxConstraint',bestBC,...
+            'KernelScale',bestKS,...
+            'CrossVal','on',...
+            'KFold',5);
+        acc_temp(r) = 1 - kfoldLoss(cv_temp);
+    end
+    acc_lc(k) = mean(acc_temp) * 100;
 end
-
 plot(train_sizes, acc_lc,'-o','LineWidth',2);
 xlabel('Training Samples');
-ylabel('Validation Accuracy (%)');
-title('TRUE LEARNING CURVE');
+ylabel('Cross-Validated Accuracy (%)');
+title('TRUE LEARNING CURVE (FULL DATASET)');
 grid on;
 
 %% -------- FIGURE 8 --------
@@ -432,14 +467,9 @@ cm1.GridVisible = 'on';
 %% -------- FIGURE 9 --------
 figure;
 
-X_eval = (X - mu) ./ (sigma + eps);
-[~, score] = predict(svmFinal, X_eval);
-
-[Xroc, Yroc, ~, ~] = perfcurve(y, score(:,2), 1);
-
+[Xroc, Yroc, ~, ~] = perfcurve(y, score_final(:,2), 1);
 plot(Xroc, Yroc,'LineWidth',2); hold on;
 plot([0 1],[0 1],'k--','LineWidth',1.5);
-
 xlabel('False Positive Rate');
 ylabel('True Positive Rate');
 title(['ROC CURVE  |  AUC = ', num2str(AUC,3)]);
@@ -486,7 +516,7 @@ end
 function [t,x_alpha,alpha_opt,alpha_vec,H2] = B2_chirp_optimizer(x,fs)
     % PARAMETERS
     t = (0:length(x)-1)/fs;                         % time vector
-    alpha_vec = linspace(-3e4,3e4,100);             % chirp rate range
+    alpha_vec = linspace(-3e4,3e4,50);              % chirp rate range
     win = hamming(256);                             % spectrogram window
     
     % DE-CHIRP THE ECHO SIGNAL
@@ -504,11 +534,11 @@ end
 %% ----- BLOCK 3 -----
 function [S_orig,S_enh,fd,t_stft,snr_before,snr_after] = B3_doppler_enhancer(x,fs)
     % SPECTROGRAM GENERATION
-    [X,fd,t_stft] = spectrogram(x,hamming(256),192,1024,fs);
+    [X,fd,t_stft] = spectrogram(x,hamming(256),192,2048,fs);
     S_orig = abs(X).^2;                             % original power spectrogram
 
     % BODY CLUTTER REMOVAL
-    fc = 0.05*fs;                                   % cutoff frequency to remove body component
+    fc = max(20, 0.01*fs);                          % cutoff frequency to remove body component
     X(abs(fd)<fc,:) = 0;                            % suppress low-frequency body motion
 
     % NOISE REMOVAL
